@@ -151,8 +151,11 @@ jobs:
           echo "ANDROID_SDK_PATH=$SDK" >> "$GITHUB_ENV"
           # Usually preinstalled on the runner; this just makes sure.
           yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$SDK" \
-            "platform-tools" "build-tools;34.0.0" "platforms;android-34" >/dev/null || true
-          ls "$SDK"
+            "cmdline-tools;latest" "platform-tools" \
+            "build-tools;34.0.0" "build-tools;35.0.1" \
+            "platforms;android-34" "platforms;android-35" >/dev/null || true
+          echo "--- SDK layout ---"
+          ls "$SDK" "$SDK/build-tools" "$SDK/platforms" || true
 
       - name: Create debug keystore
         shell: bash
@@ -269,9 +272,20 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p build
-          godot --headless --path . --export-debug "Android" build/IronYard-debug.apk
+          set +e
+          godot --headless --verbose --path . --export-debug "Android" build/IronYard-debug.apk 2>&1 | tee export.log
+          STATUS=${PIPESTATUS[0]}
+          set -e
+          if [[ ! -s build/IronYard-debug.apk ]]; then
+            echo "::group::Export diagnostics (config errors, templates, SDK)"
+            grep -n -i -E "error|missing|invalid|not found|cannot|template|sdk|keystore|java" export.log | head -80 || true
+            ls -la "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable" || true
+            cat "$HOME/.config/godot/editor_settings-4.4.tres" || true
+            ls "$HOME/.config/godot" || true
+            echo "::endgroup::"
+            exit 1
+          fi
           ls -lh build/
-          test -s build/IronYard-debug.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
