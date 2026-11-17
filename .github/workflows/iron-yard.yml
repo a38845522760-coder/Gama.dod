@@ -8,6 +8,7 @@ name: Iron Yard - keep ZIP only and build Android APK
 
 on:
   push:
+    branches: ['**']   # branches only, so the release tag created below never re-triggers this workflow
     paths:
       - 'IronYard_Phase2_RepoRoot.zip'
       - 'IronYard_Phase1_RepoRoot.zip'
@@ -294,4 +295,18 @@ jobs:
           path: ${{ env.PROJECT_DIR }}/build/IronYard-debug.apk
           if-no-files-found: error
           retention-days: 30
+
+      - name: Publish APK as a GitHub Release (direct download, no ZIP)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="apk-build-${{ github.run_number }}"
+          gh release create "$TAG" "$PROJECT_DIR/build/IronYard-debug.apk" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "${{ github.sha }}" \
+            --title "Iron Yard APK #${{ github.run_number }}" \
+            --notes "Debug-signed Android APK built from the project ZIP."
+          echo "Download: https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
           
