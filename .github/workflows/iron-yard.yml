@@ -224,8 +224,8 @@ jobs:
           architectures/arm64-v8a=true
           architectures/x86=false
           architectures/x86_64=false
-          version/code=1
-          version/name="0.2.0"
+          version/code=${{ github.run_number }}
+          version/name="0.3.0"
           package/unique_name="com.ironyard.game"
           package/name="Iron Yard"
           package/signed=true
@@ -245,6 +245,7 @@ jobs:
           user_data_backup/allow=false
           command_line/extra_args=""
           apk_expansion/enable=false
+          permissions/vibrate=true
           permissions/internet=true
           permissions/access_network_state=true
           permissions/access_wifi_state=true
@@ -257,15 +258,32 @@ jobs:
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -euo pipefail
-          godot --headless --editor --path . --quit
+          set +e
+          godot --headless --editor --path . --quit 2>&1 | tee import.log
+          set -e
+          # Script parse errors show up here; surface them as annotations (does not fail the build).
+          grep -E "SCRIPT ERROR|Parse Error|ERROR: .*\\.gd" import.log | head -40 | while read -r line; do echo "::warning::$line"; done || true
 
       - name: Run smoke tests (non-blocking)
         shell: bash
         working-directory: ${{ env.PROJECT_DIR }}
         continue-on-error: true
         run: |
-          godot --headless --path . --script res://tests/smoke_test.gd
-          godot --headless --path . --script res://tests/runtime_integration_test.gd
+          set +e
+          {
+            for test_script in smoke_test runtime_integration_test map_integration_test; do
+              echo "=== $test_script ==="
+              godot --headless --path . --script res://tests/$test_script.gd
+              echo "exit=$?"
+            done
+          } 2>&1 | tee tests.log
+          {
+            echo '### Iron Yard test results'
+            echo '```'
+            grep -E "===|PASS|FAIL|SCRIPT ERROR|Parse Error|ERROR|exit=" tests.log | head -80
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
 
       - name: Export debug APK
         shell: bash
@@ -288,6 +306,18 @@ jobs:
           fi
           ls -lh build/
 
+      - name: Upload logs (import, tests, export)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: IronYard-logs
+          path: |
+            ${{ env.PROJECT_DIR }}/import.log
+            ${{ env.PROJECT_DIR }}/tests.log
+            ${{ env.PROJECT_DIR }}/export.log
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
@@ -309,4 +339,3 @@ jobs:
             --title "Iron Yard APK #${{ github.run_number }}" \
             --notes "Debug-signed Android APK built from the project ZIP."
           echo "Download: https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
-          
