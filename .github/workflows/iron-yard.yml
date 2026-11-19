@@ -1,0 +1,343 @@
+name: Iron Yard - keep ZIP only and build Android APK
+
+# One workflow, two jobs:
+#   1) validate-and-clean : validates the ZIP (without extracting into the repo)
+#                           and removes any previously extracted project files.
+#   2) build-apk          : extracts the ZIP only inside the temporary runner,
+#                           exports a debug-signed APK and uploads it as an artifact.
+
+on:
+  push:
+    branches: ['**']   # branches only, so the release tag created below never re-triggers this workflow
+    paths:
+      - 'IronYard_Phase2_RepoRoot.zip'
+      - 'IronYard_Phase1_RepoRoot.zip'
+      - '.github/workflows/iron-yard.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: iron-yard
+  cancel-in-progress: false
+
+env:
+  GODOT_VERSION: "4.7.2"
+  GODOT_RELEASE: "4.7.2-stable"
+
+jobs:
+  validate-and-clean:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate ZIP without extracting it
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARCHIVE=""
+          for candidate in IronYard_Phase2_RepoRoot.zip IronYard_Phase1_RepoRoot.zip; do
+            if [[ -f "$candidate" ]]; then
+              ARCHIVE="$candidate"
+              break
+            fi
+          done
+          if [[ -z "$ARCHIVE" ]]; then
+            echo "::error::Iron Yard ZIP was not found in the repository root."
+            exit 1
+          fi
+          unzip -t "$ARCHIVE"
+          if ! unzip -Z1 "$ARCHIVE" | grep -qx 'project.godot'; then
+            echo "::error::project.godot must be directly at the ZIP root."
+            exit 1
+          fi
+          echo "ZIP is valid. It has NOT been extracted."
+
+      - name: Remove previously extracted project files from Git
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm -r --ignore-unmatch assets data docs scenes scripts tests project.godot
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --cached --quiet; then
+            echo "No extracted project files need removal."
+          else
+            git commit -m "Keep Iron Yard project as ZIP only"
+            git push
+          fi
+
+  build-apk:
+    needs: validate-and-clean
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Extract project ZIP (temporary, not committed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARCHIVE=""
+          for candidate in IronYard_Phase2_RepoRoot.zip IronYard_Phase1_RepoRoot.zip; do
+            if [[ -f "$candidate" ]]; then ARCHIVE="$candidate"; break; fi
+          done
+          if [[ -z "$ARCHIVE" ]]; then
+            echo "::error::Iron Yard ZIP was not found in the repository root."
+            exit 1
+          fi
+          while IFS= read -r entry; do
+            n="${entry%/}"
+            if [[ "$n" == /* || "$n" == ".." || "$n" == ../* || "$n" == */../* || "$n" == */.. ]]; then
+              echo "::error::Unsafe ZIP entry: $entry"; exit 1
+            fi
+          done < <(unzip -Z1 "$ARCHIVE")
+          PROJECT_DIR="$RUNNER_TEMP/iron-yard"
+          mkdir -p "$PROJECT_DIR"
+          unzip -q "$ARCHIVE" -d "$PROJECT_DIR"
+          if [[ ! -f "$PROJECT_DIR/project.godot" ]]; then
+            echo "::error::project.godot must be directly at the ZIP root."; exit 1
+          fi
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Using $ARCHIVE"
+
+      - name: Cache Godot binary and export templates
+        id: cache-godot
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/godot-bin
+            ~/.local/share/godot/export_templates
+          key: godot-${{ env.GODOT_RELEASE }}-android-4-7-v1
+
+      - name: Install Godot and Android export templates
+        if: steps.cache-godot.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE="https://github.com/godotengine/godot/releases/download/${GODOT_RELEASE}"
+          mkdir -p "$HOME/godot-bin" "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
+          wget -q "$BASE/Godot_v${GODOT_RELEASE}_linux.x86_64.zip" -O "$RUNNER_TEMP/godot.zip"
+          unzip -q "$RUNNER_TEMP/godot.zip" -d "$HOME/godot-bin"
+          wget -q "$BASE/Godot_v${GODOT_RELEASE}_export_templates.tpz" -O "$RUNNER_TEMP/templates.tpz"
+          # Only the Android templates + version file are needed.
+          unzip -q -j "$RUNNER_TEMP/templates.tpz" 'templates/android_*' 'templates/version.txt' \
+            -d "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
+          rm -f "$RUNNER_TEMP/godot.zip" "$RUNNER_TEMP/templates.tpz"
+
+      - name: Prepare Godot on PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          ln -sf "$HOME/godot-bin/Godot_v${GODOT_RELEASE}_linux.x86_64" "$HOME/godot-bin/godot"
+          chmod +x "$HOME/godot-bin/Godot_v${GODOT_RELEASE}_linux.x86_64"
+          echo "$HOME/godot-bin" >> "$GITHUB_PATH"
+          ls "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
+
+      - name: Ensure Android SDK components
+        shell: bash
+        run: |
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_SDK_PATH=$SDK" >> "$GITHUB_ENV"
+          # Usually preinstalled on the runner; this just makes sure.
+          yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$SDK" \
+            "cmdline-tools;latest" "platform-tools" \
+            "build-tools;34.0.0" "build-tools;35.0.1" \
+            "platforms;android-34" "platforms;android-35" >/dev/null || true
+          echo "--- SDK layout ---"
+          ls "$SDK" "$SDK/build-tools" "$SDK/platforms" || true
+
+      - name: Create debug keystore
+        shell: bash
+        run: |
+          set -euo pipefail
+          KEYSTORE="$RUNNER_TEMP/debug.keystore"
+          keytool -genkeypair -v -keystore "$KEYSTORE" \
+            -alias androiddebugkey -storepass android -keypass android \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US" >/dev/null
+          echo "GODOT_ANDROID_KEYSTORE_DEBUG_PATH=$KEYSTORE" >> "$GITHUB_ENV"
+          echo "GODOT_ANDROID_KEYSTORE_DEBUG_USER=androiddebugkey" >> "$GITHUB_ENV"
+          echo "GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD=android" >> "$GITHUB_ENV"
+
+      - name: Configure Godot editor settings
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.config/godot"
+          cat > "$HOME/.config/godot/editor_settings-4.7.tres" <<EOF
+          [gd_resource type="EditorSettings" format=3]
+
+          [resource]
+          export/android/android_sdk_path = "${ANDROID_SDK_PATH}"
+          export/android/java_sdk_path = "${JAVA_HOME}"
+          export/android/debug_keystore = "${GODOT_ANDROID_KEYSTORE_DEBUG_PATH}"
+          export/android/debug_keystore_user = "androiddebugkey"
+          export/android/debug_keystore_pass = "android"
+          EOF
+          # Remove the leading indentation added by YAML.
+          sed -i 's/^          //' "$HOME/.config/godot/editor_settings-4.7.tres"
+          cat "$HOME/.config/godot/editor_settings-4.7.tres"
+
+      - name: Write Android export preset
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$PROJECT_DIR/export_presets.cfg" <<'EOF'
+          [preset.0]
+
+          name="Android"
+          platform="Android"
+          runnable=true
+          advanced_options=false
+          dedicated_server=false
+          custom_features=""
+          export_filter="all_resources"
+          include_filter=""
+          exclude_filter="tests/*, docs/*, content_src/*, tools/*"
+          export_path="build/IronYard-debug.apk"
+          encryption_include_filters=""
+          encryption_exclude_filters=""
+          encrypt_pck=false
+          encrypt_directory=false
+
+          [preset.0.options]
+
+          custom_template/debug=""
+          custom_template/release=""
+          gradle_build/use_gradle_build=false
+          gradle_build/export_format=0
+          gradle_build/min_sdk=""
+          gradle_build/target_sdk=""
+          architectures/armeabi-v7a=true
+          architectures/arm64-v8a=true
+          architectures/x86=false
+          architectures/x86_64=false
+          version/code=${{ github.run_number }}
+          version/name="0.4.0"
+          package/unique_name="com.ironyard.game"
+          package/name="Iron Yard"
+          package/signed=true
+          package/app_category=2
+          package/retain_data_on_uninstall=false
+          package/exclude_from_recents=false
+          launcher_icons/main_192x192=""
+          launcher_icons/adaptive_foreground_432x432=""
+          launcher_icons/adaptive_background_432x432=""
+          graphics/opengl_debug=false
+          xr_features/xr_mode=0
+          screen/immersive_mode=true
+          screen/support_small=true
+          screen/support_normal=true
+          screen/support_large=true
+          screen/support_xlarge=true
+          user_data_backup/allow=false
+          command_line/extra_args=""
+          apk_expansion/enable=false
+          permissions/vibrate=true
+          permissions/internet=true
+          permissions/manage_external_storage=true
+          permissions/read_external_storage=true
+          permissions/access_network_state=true
+          permissions/access_wifi_state=true
+          permissions/change_wifi_multicast_state=true
+          EOF
+          sed -i 's/^          //' "$PROJECT_DIR/export_presets.cfg"
+
+      - name: Import project resources
+        shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -euo pipefail
+          set +e
+          timeout 300 godot --headless --editor --path . --quit 2>&1 | tee import.log
+          set -e
+          # Script parse errors show up here; surface them as annotations (does not fail the build).
+          grep -E "SCRIPT ERROR|Parse Error|ERROR: .*\\.gd" import.log | head -40 | while read -r line; do echo "::warning::$line"; done || true
+
+      - name: Run smoke tests (non-blocking)
+        shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
+        continue-on-error: true
+        run: |
+          set +e
+          {
+            for test_script in smoke_test runtime_integration_test map_integration_test content_test; do
+              echo "=== $test_script ==="
+              timeout 120 godot --headless --path . --script res://tests/$test_script.gd
+              echo "exit=$? (124 = timeout)"
+            done
+          } 2>&1 | tee tests.log
+          {
+            echo '### Iron Yard test results'
+            echo '```'
+            grep -E "===|PASS|FAIL|SCRIPT ERROR|Parse Error|ERROR|exit=" tests.log | head -80
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+
+      - name: Export debug APK
+        shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          set +e
+          godot --headless --verbose --path . --export-debug "Android" build/IronYard-debug.apk 2>&1 | tee export.log
+          STATUS=${PIPESTATUS[0]}
+          set -e
+          if [[ ! -s build/IronYard-debug.apk ]]; then
+            echo "::group::Export diagnostics (config errors, templates, SDK)"
+            grep -n -i -E "error|missing|invalid|not found|cannot|template|sdk|keystore|java" export.log | head -80 || true
+            ls -la "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable" || true
+            cat "$HOME/.config/godot/editor_settings-4.7.tres" || true
+            ls "$HOME/.config/godot" || true
+            echo "::endgroup::"
+            exit 1
+          fi
+          ls -lh build/
+
+      - name: Upload logs (import, tests, export)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: IronYard-logs
+          path: |
+            ${{ env.PROJECT_DIR }}/import.log
+            ${{ env.PROJECT_DIR }}/tests.log
+            ${{ env.PROJECT_DIR }}/export.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: IronYard-debug-apk
+          path: ${{ env.PROJECT_DIR }}/build/IronYard-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish APK as a GitHub Release (direct download, no ZIP)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="apk-build-${{ github.run_number }}"
+          gh release create "$TAG" "$PROJECT_DIR/build/IronYard-debug.apk" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "${{ github.sha }}" \
+            --title "Iron Yard APK #${{ github.run_number }}" \
+            --notes "Debug-signed Android APK built from the project ZIP."
+          echo "Download: https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
