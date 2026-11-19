@@ -205,7 +205,7 @@ jobs:
           custom_features=""
           export_filter="all_resources"
           include_filter=""
-          exclude_filter="tests/*, docs/*"
+          exclude_filter="tests/*, docs/*, content_src/*, tools/*"
           export_path="build/IronYard-debug.apk"
           encryption_include_filters=""
           encryption_exclude_filters=""
@@ -225,7 +225,7 @@ jobs:
           architectures/x86=false
           architectures/x86_64=false
           version/code=${{ github.run_number }}
-          version/name="0.3.0"
+          version/name="0.4.0"
           package/unique_name="com.ironyard.game"
           package/name="Iron Yard"
           package/signed=true
@@ -271,7 +271,7 @@ jobs:
         run: |
           set +e
           {
-            for test_script in smoke_test runtime_integration_test map_integration_test; do
+            for test_script in smoke_test runtime_integration_test map_integration_test content_test; do
               echo "=== $test_script ==="
               godot --headless --path . --script res://tests/$test_script.gd
               echo "exit=$?"
