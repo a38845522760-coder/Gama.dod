@@ -61,14 +61,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git rm -r --ignore-unmatch assets data docs scenes scripts tests project.godot
+          ARCHIVE=""
+          for candidate in IronYard_Phase2_RepoRoot.zip IronYard_Phase1_RepoRoot.zip; do
+            if [[ -f "$candidate" ]]; then ARCHIVE="$candidate"; break; fi
+          done
+          # Remove every top-level item that came out of the ZIP (never the ZIP itself or .github).
+          while IFS= read -r top; do
+            [[ -z "$top" || "$top" == ".github" || "$top" == ".git" || "$top" == *.zip ]] && continue
+            git rm -r -q --ignore-unmatch -- "$top"
+          done < <(unzip -Z1 "$ARCHIVE" | cut -d/ -f1 | sort -u)
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if git diff --cached --quiet; then
             echo "No extracted project files need removal."
           else
             git commit -m "Keep Iron Yard project as ZIP only"
-            git push
+            git push || echo "::warning::Could not push the cleanup commit; the build continues anyway."
           fi
 
   build-apk:
