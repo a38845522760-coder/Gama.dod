@@ -1,0 +1,14 @@
+{
+  "id": "demo_arena",
+  "type": "map",
+  "version": 1,
+  "name": {
+    "fa": "نقشه آزمایشی",
+    "en": "Demo arena"
+  },
+  "max_players": 4,
+  "entry_scene": "demo_arena.tscn",
+  "modes": [
+    "battle"
+  ]
+}
