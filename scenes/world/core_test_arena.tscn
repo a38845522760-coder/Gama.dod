@@ -1,0 +1,31 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://scripts/world/core_test_arena.gd" id="1_arena"]
+
+[sub_resource type="Environment" id="ArenaEnvironment"]
+background_mode = 1
+background_color = Color(0.025, 0.04, 0.055, 1)
+ambient_light_source = 2
+ambient_light_color = Color(0.46, 0.54, 0.58, 1)
+ambient_light_energy = 0.72
+reflected_light_source = 0
+tonemap_mode = 2
+
+[node name="CoreTestArena" type="Node3D"]
+script = ExtResource("1_arena")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("ArenaEnvironment")
+
+[node name="SunLight" type="DirectionalLight3D" parent="."]
+rotation = Vector3(-0.78, -0.52, 0.0)
+light_color = Color(0.82, 0.88, 0.92, 1)
+light_energy = 1.15
+shadow_enabled = true
+
+[node name="FillLight" type="OmniLight3D" parent="."]
+position = Vector3(0, 7, 2)
+light_color = Color(0.26, 0.54, 0.66, 1)
+light_energy = 0.55
+omni_range = 22.0
+shadow_enabled = false
